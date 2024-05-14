@@ -1,8 +1,12 @@
 package model_api
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/textproto"
+	"strings"
 	"time"
 
 	"github.com/itcwc/go-zhipu/utils"
@@ -10,7 +14,7 @@ import (
 
 var v4url string = "https://open.bigmodel.cn/api/paas/v4/"
 
-var v3url string = "https://open.bigmodel.cn/api/paas/v3/"
+var v3url string = "https://open.bigmodel.cn/api/paas/v4/"
 
 type PostParams struct {
 	Model    string     `json:"model"`
@@ -20,6 +24,44 @@ type PostParams struct {
 type Messages struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+type StreamResponseData struct {
+	ID      string `json:"id"`
+	Created int64  `json:"created"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Index int `json:"index"`
+		Delta struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
+	FinishReason string `json:"finish_reason,omitempty"`
+	Usage        struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage,omitempty"`
+}
+
+func ParseResponse(rawResponse string) (*StreamResponseData, error) {
+	// 找到有效数据部分的起始位置
+	startIndex := strings.Index(rawResponse, "{")
+	if startIndex == -1 {
+		return nil, errors.New("未找到有效数据部分")
+	}
+
+	// 截取有效数据部分
+	validData := rawResponse[startIndex:]
+
+	// 手动解析
+	var data *StreamResponseData
+	if err := json.Unmarshal([]byte(validData), &data); err != nil {
+		return nil, fmt.Errorf("解析数据失败: %v", err)
+	}
+
+	return data, nil
 }
 
 // 通用模型
@@ -36,6 +78,37 @@ func BeCommonModel(expireAtTime int64, postParams PostParams, apiKey string) (ma
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}
 	return postResponse, nil
+}
+
+func BeCommonModelStream(expireAtTime int64, postParams PostParams, apiKey string) (io.Reader, error) {
+	token, _ := utils.GenerateToken(apiKey, expireAtTime)
+
+	// 示例用法
+	apiURL := v4url + "chat/completions"
+	timeout := 60 * time.Second
+
+	// 创建管道
+	reader, writer := io.Pipe()
+
+	go func() {
+		// 在 goroutine 中执行请求，并将结果写入管道
+		postResponse, err := utils.Stream(apiURL, token, postParams, timeout)
+		if err != nil {
+			writer.CloseWithError(fmt.Errorf("创建请求失败: %v", err))
+			return
+		}
+
+		_, err = io.Copy(writer, postResponse.Body)
+		if err != nil {
+			writer.CloseWithError(fmt.Errorf("写入管道失败: %v", err))
+			return
+		}
+
+		defer postResponse.Body.Close()
+		defer writer.Close()
+	}()
+
+	return reader, nil
 }
 
 type PostImageParams struct {
